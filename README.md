@@ -130,3 +130,8 @@ LDAP library default is on. This option disables usage of referral messages from
 LDAP server. Usefull for authenticating against read only AD server without access
 to read write.
 
+## remoteuser_attribute
+expected value: string
+
+If you want the remote_user variable to be filled by an attribute fetched from the LDAP server, use this.
+Otherwise the login entered by the user will be used.

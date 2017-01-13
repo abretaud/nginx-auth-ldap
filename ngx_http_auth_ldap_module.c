@@ -79,6 +79,8 @@ typedef struct {
     ngx_str_t group_attribute;
     ngx_flag_t group_attribute_dn;
 
+    ngx_str_t remoteuser_attribute;
+
     ngx_flag_t ssl_check_cert;
     ngx_str_t ssl_ca_dir;
     ngx_str_t ssl_ca_file;
@@ -118,6 +120,7 @@ typedef struct {
 typedef struct {
     uint32_t small_hash;     /* murmur2 hash of username ^ &server       */
     uint32_t outcome;        /* OUTCOME_DENY or OUTCOME_ALLOW            */
+    ngx_str_t remote_user;    /* remote_user value fetched from ldap (or username if no remoteuser_attribute option) */
     ngx_msec_t time;         /* ngx_current_msec when created            */
     u_char big_hash[16];     /* md5 hash of (username, server, password) */
 } ngx_http_auth_ldap_cache_elt_t;
@@ -157,6 +160,7 @@ typedef struct {
     ngx_http_auth_ldap_cache_elt_t *cache_bucket;
     u_char cache_big_hash[16];
     uint32_t cache_small_hash;
+    ngx_str_t remote_user;
 } ngx_http_auth_ldap_ctx_t;
 
 typedef enum {
@@ -401,6 +405,8 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
         server->bind_dn_passwd = value[1];
     } else if (ngx_strcmp(value[0].data, "group_attribute") == 0) {
         server->group_attribute = value[1];
+    } else if (ngx_strcmp(value[0].data, "remoteuser_attribute") == 0) {
+        server->remoteuser_attribute = value[1];
     } else if (ngx_strcmp(value[0].data, "group_attribute_is_dn") == 0 && ngx_strcmp(value[1].data, "on") == 0) {
         server->group_attribute_dn = 1;
     } else if (ngx_strcmp(value[0].data, "require") == 0) {
@@ -904,7 +910,7 @@ ngx_http_auth_ldap_init_cache(ngx_cycle_t *cycle)
     return NGX_OK;
 }
 
-static ngx_int_t
+static ngx_http_auth_ldap_cache_elt_t
 ngx_http_auth_ldap_check_cache(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx,
     ngx_http_auth_ldap_cache_t *cache, ngx_http_auth_ldap_server_t *server)
 {
@@ -929,16 +935,17 @@ ngx_http_auth_ldap_check_cache(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
         if (elt->small_hash == ctx->cache_small_hash &&
                 elt->time > time_limit &&
                 memcmp(elt->big_hash, ctx->cache_big_hash, 16) == 0) {
-            return elt->outcome;
+            return *elt;
         }
     }
 
-    return -1;
+    elt->outcome = OUTCOME_ERROR;
+    return *elt;
 }
 
 static void
 ngx_http_auth_ldap_update_cache(ngx_http_auth_ldap_ctx_t *ctx,
-        ngx_http_auth_ldap_cache_t *cache, ngx_flag_t outcome)
+        ngx_http_auth_ldap_cache_t *cache, ngx_flag_t outcome, ngx_str_t remote_user)
 {
     ngx_http_auth_ldap_cache_elt_t *elt, *oldest_elt;
     ngx_uint_t i;
@@ -953,6 +960,7 @@ ngx_http_auth_ldap_update_cache(ngx_http_auth_ldap_ctx_t *ctx,
 
     oldest_elt->time = ngx_current_msec;
     oldest_elt->outcome = outcome;
+    oldest_elt->remote_user = remote_user;
     oldest_elt->small_hash = ctx->cache_small_hash;
     ngx_memcpy(oldest_elt->big_hash, ctx->cache_big_hash, 16);
 }
@@ -1567,6 +1575,30 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
                             ngx_memcpy(c->rctx->dn.data, dn, c->rctx->dn.len + 1);
                             ldap_memfree(dn);
                         }
+
+                        /* If remoteuser_attribute was specified, get the attribute */
+                        if (c->rctx->server->remoteuser_attribute.data != NULL) {
+                            const char * attribute;
+                            BerElement * ber;
+                            BerValue ** vals;
+                            int pos;
+                            // loops through attributes and values
+                            attribute = ldap_first_attribute(c->ld, result, &ber);
+                            while (attribute) {
+                                vals = ldap_get_values_len(c->ld, result, attribute);
+                                for(pos = 0; pos < ldap_count_values_len(vals); pos++)
+                                printf("%s: %s\n", attribute, vals[pos]->bv_val);
+                                if (c->rctx->server->remoteuser_attribute.data == (u_char *) attribute) {
+                                    c->rctx->remote_user.data = (u_char *) vals[pos]->bv_val;
+                                    c->rctx->remote_user.len = vals[pos]->bv_len;
+                                    ldap_value_free_len(vals);
+                                    break;
+                                }
+                                ldap_value_free_len(vals);
+                                attribute = ldap_next_attribute(c->ld, result, ber);
+                            };
+                            ber_free(ber, 0);
+                        }
                     }
                 } else if (ldap_msgtype(result) == LDAP_RES_SEARCH_RESULT) {
                     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Received search result (%d: %s [%s])",
@@ -1831,10 +1863,11 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
 
                 /* Check cache if enabled */
                 if (ngx_http_auth_ldap_cache.buckets != NULL) {
-                    rc = ngx_http_auth_ldap_check_cache(r, ctx, &ngx_http_auth_ldap_cache, ctx->server);
-                    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Using cached outcome %d", rc);
-                    if (rc == OUTCOME_DENY || rc == OUTCOME_ALLOW) {
-                        ctx->outcome = (rc == OUTCOME_DENY ? OUTCOME_CACHED_DENY : OUTCOME_CACHED_ALLOW);
+                    ngx_http_auth_ldap_cache_elt_t rcc = ngx_http_auth_ldap_check_cache(r, ctx, &ngx_http_auth_ldap_cache, ctx->server);
+                    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Using cached outcome %d", rcc.outcome);
+                    if (rcc.outcome == OUTCOME_DENY || rcc.outcome == OUTCOME_ALLOW) {
+                        ctx->outcome = (rcc.outcome == OUTCOME_DENY ? OUTCOME_CACHED_DENY : OUTCOME_CACHED_ALLOW);
+                        ctx->remote_user = rcc.remote_user;
                         ctx->phase = PHASE_NEXT;
                         break;
                     }
@@ -1974,7 +2007,12 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
                 if (ngx_http_auth_ldap_cache.buckets != NULL &&
                     (ctx->outcome == OUTCOME_DENY || ctx->outcome == OUTCOME_ALLOW)) {
                     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Caching outcome %d", ctx->outcome);
-                    ngx_http_auth_ldap_update_cache(ctx, &ngx_http_auth_ldap_cache, ctx->outcome);
+                    ngx_http_auth_ldap_update_cache(ctx, &ngx_http_auth_ldap_cache, ctx->outcome, ctx->remote_user);
+                }
+
+                /* Update user name with remote_user */
+                if (ctx->remote_user.data != NULL) {
+                    r->headers_in.user = ctx->remote_user;
                 }
 
                 if (ctx->outcome == OUTCOME_ALLOW || ctx->outcome == OUTCOME_CACHED_ALLOW) {
