@@ -407,6 +407,7 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
         server->group_attribute = value[1];
     } else if (ngx_strcmp(value[0].data, "remoteuser_attribute") == 0) {
         server->remoteuser_attribute = value[1];
+        ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0, "http_auth_ldap: Setting remoteuser_attribute");
     } else if (ngx_strcmp(value[0].data, "group_attribute_is_dn") == 0 && ngx_strcmp(value[1].data, "on") == 0) {
         server->group_attribute_dn = 1;
     } else if (ngx_strcmp(value[0].data, "require") == 0) {
@@ -1586,13 +1587,15 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
                             attribute = ldap_first_attribute(c->ld, result, &ber);
                             while (attribute) {
                                 vals = ldap_get_values_len(c->ld, result, attribute);
-                                for(pos = 0; pos < ldap_count_values_len(vals); pos++)
-                                printf("%s: %s\n", attribute, vals[pos]->bv_val);
-                                if (c->rctx->server->remoteuser_attribute.data == (u_char *) attribute) {
-                                    c->rctx->remote_user.data = (u_char *) vals[pos]->bv_val;
-                                    c->rctx->remote_user.len = vals[pos]->bv_len;
-                                    ldap_value_free_len(vals);
-                                    break;
+                                for(pos = 0; pos < ldap_count_values_len(vals); pos++) {
+                                    ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: user attribute %s: %s\n", attribute, vals[pos]->bv_val);
+                                    if (c->rctx->server->remoteuser_attribute.data == (u_char *) attribute) {
+                                        ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: found remote_user %s: %s\n", attribute, vals[pos]->bv_val);
+                                        c->rctx->remote_user.data = (u_char *) vals[pos]->bv_val;
+                                        c->rctx->remote_user.len = vals[pos]->bv_len;
+                                        ldap_value_free_len(vals);
+                                        break;
+                                    }
                                 }
                                 ldap_value_free_len(vals);
                                 attribute = ldap_next_attribute(c->ld, result, ber);
