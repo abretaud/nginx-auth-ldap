@@ -1567,33 +1567,6 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
             case STATE_SEARCHING:
                 if (ldap_msgtype(result) == LDAP_RES_SEARCH_ENTRY) {
                     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Received a search entry");
-
-                    /* If remoteuser_attribute was specified, get the attribute */
-                    if (c->rctx->server->remoteuser_attribute.data != NULL) {
-                        const char * attribute;
-                        BerElement * ber;
-                        BerValue ** vals;
-                        int pos;
-                        // loops through attributes and values
-                        attribute = ldap_first_attribute(c->ld, result, &ber);
-                        while (attribute) {
-                            vals = ldap_get_values_len(c->ld, result, attribute);
-                            for(pos = 0; pos < ldap_count_values_len(vals); pos++) {
-                                ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: user attribute %s: %s\n", attribute, vals[pos]->bv_val);
-                                if (ngx_strcmp(c->rctx->server->remoteuser_attribute.data, attribute) == 0) {
-                                    ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: found remote_user %s: %s\n", attribute, vals[pos]->bv_val);
-                                    c->rctx->remote_user.data = (u_char *) vals[pos]->bv_val;
-                                    c->rctx->remote_user.len = vals[pos]->bv_len;
-                                    ldap_value_free_len(vals);
-                                    break;
-                                }
-                            }
-                            ldap_value_free_len(vals);
-                            attribute = ldap_next_attribute(c->ld, result, ber);
-                        };
-                        ber_free(ber, 0);
-                    }
-
                     if (c->rctx->dn.data == NULL) {
                         dn = ldap_get_dn(c->ld, result);
                         if (dn != NULL) {
@@ -1617,6 +1590,32 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
                 }
                 ngx_log_debug3(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Received comparison result (%d: %s [%s])",
                     error_code, ldap_err2string(error_code), error_msg ? error_msg : "-");
+
+                /* If remoteuser_attribute was specified, get the attribute */
+                if (c->rctx->server->remoteuser_attribute.data != NULL) {
+                    const char * attribute;
+                    BerElement * ber;
+                    BerValue ** vals;
+                    int pos;
+                    // loops through attributes and values
+                    attribute = ldap_first_attribute(c->ld, result, &ber);
+                    while (attribute) {
+                        vals = ldap_get_values_len(c->ld, result, attribute);
+                        for(pos = 0; pos < ldap_count_values_len(vals); pos++) {
+                            ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: user attribute %s: %s\n", attribute, vals[pos]->bv_val);
+                            if (ngx_strcmp(c->rctx->server->remoteuser_attribute.data, attribute) == 0) {
+                                ngx_conf_log_error(NGX_LOG_NOTICE, NULL, 0, "http_auth_ldap: found remote_user %s: %s\n", attribute, vals[pos]->bv_val);
+                                c->rctx->remote_user.data = (u_char *) vals[pos]->bv_val;
+                                c->rctx->remote_user.len = vals[pos]->bv_len;
+                                ldap_value_free_len(vals);
+                                break;
+                            }
+                        }
+                        ldap_value_free_len(vals);
+                        attribute = ldap_next_attribute(c->ld, result, ber);
+                    };
+                    ber_free(ber, 0);
+                }
                 ngx_http_auth_ldap_reply_connection(c, error_code, error_msg);
                 break;
 
